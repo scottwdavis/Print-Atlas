@@ -113,7 +113,7 @@ enum Job {
     Thumb(FileEntry, String),
     Inspect(FileEntry, u64, usize),
     Model(FileEntry, u64),
-    Orbit(Arc<Model>, u64, Camera),
+    Orbit(Arc<Model>, u64, Camera, (u32, u32)),
     Plate(Arc<Vec<u8>>, u64),
 }
 enum Event {
@@ -152,14 +152,14 @@ impl Pool {
                         Job::Model(file, id) => Event::Detail(
                             id,
                             (|| {
-                                let m = Arc::new(model::load_model(&file.path, 250_000)?);
+                                let m = Arc::new(model::load_model_full(&file.path)?);
                                 let r = render::render_model(&m, 1000, 760, Camera::default());
                                 Ok(DetailData::Model(m, r))
                             })()
                             .map_err(|e: anyhow::Error| e.to_string()),
                         ),
-                        Job::Orbit(m, id, camera) => {
-                            Event::Orbit(id, Ok(render::render_model(&m, 1000, 760, camera)))
+                        Job::Orbit(m, id, camera, (width, height)) => {
+                            Event::Orbit(id, Ok(render::render_model(&m, width, height, camera)))
                         }
                         Job::Plate(bytes, id) => Event::Detail(
                             id,
@@ -272,7 +272,7 @@ fn inspect_file(file: &FileEntry, page: usize) -> anyhow::Result<DetailData> {
                 return Ok(DetailData::Plates(plates, first));
             }
         }
-        let m = Arc::new(model::load_model(&file.path, 250_000)?);
+        let m = Arc::new(model::load_model_full(&file.path)?);
         let r = render::render_model(&m, 1000, 760, Camera::default());
         return Ok(DetailData::Model(m, r));
     }
@@ -341,6 +341,8 @@ pub struct AtlasApp {
     current_model: Option<Arc<Model>>,
     camera: Camera,
     rendered_camera: Camera,
+    viewport_size: (u32, u32),
+    rendered_size: (u32, u32),
     orbit_pending: bool,
     view_zoom: f32,
     view_pan: Vec2,
@@ -420,6 +422,8 @@ impl AtlasApp {
             current_model: None,
             camera: Camera::default(),
             rendered_camera: Camera::default(),
+            viewport_size: (1000, 760),
+            rendered_size: (1000, 760),
             orbit_pending: false,
             view_zoom: 1.,
             view_pan: Vec2::ZERO,
@@ -569,6 +573,7 @@ impl AtlasApp {
                             }
                             DetailData::Model(m, r) => {
                                 self.current_model = Some(m);
+                                self.rendered_size = (r.width, r.height);
                                 self.asset = Some(Asset::from(&self.ctx, "model-preview", r));
                                 self.camera = Camera::default();
                                 self.rendered_camera = self.camera;
@@ -1427,16 +1432,29 @@ impl AtlasApp {
                         let area = Vec2::new(ui.available_width(), (ui.available_height() - 75.0).max(150.0));
                         let (rect, response) = ui.allocate_exact_size(area, egui::Sense::click_and_drag());
                         ui.painter().rect_filled(rect, 8.0, Color32::from_rgb(32, 39, 47));
-                        let scale = (rect.width() / texture.size_vec2().x)
-                            .min(rect.height() / texture.size_vec2().y) * self.view_zoom;
-                        let destination = egui::Rect::from_center_size(rect.center() + self.view_pan, texture.size_vec2() * scale);
+                        let destination = if self.current_model.is_some() {
+                            // The camera projects into this exact viewport, never into a
+                            // smaller image that is subsequently translated or cropped.
+                            let pixels_per_point = ui.ctx().pixels_per_point();
+                            self.viewport_size = render::bounded_dimensions(
+                                (rect.width() * pixels_per_point).round() as u32,
+                                (rect.height() * pixels_per_point).round() as u32,
+                            );
+                            rect
+                        } else {
+                            let scale = (rect.width() / texture.size_vec2().x)
+                                .min(rect.height() / texture.size_vec2().y) * self.view_zoom;
+                            egui::Rect::from_center_size(rect.center() + self.view_pan, texture.size_vec2() * scale)
+                        };
                         ui.painter().with_clip_rect(rect).image(texture.id(), destination,
                             egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
                         if self.current_model.is_some() {
                             if response.dragged() {
                                 let delta = ui.input(|i| i.pointer.delta());
                                 if ui.input(|i| i.pointer.secondary_down() || i.modifiers.shift) {
-                                    self.view_pan += delta;
+                                    let side = rect.width().min(rect.height()).max(1.0);
+                                    self.camera.pan[0] += delta.x / side;
+                                    self.camera.pan[1] += delta.y / side;
                                 } else {
                                     self.camera.yaw += delta.x * 0.009;
                                     self.camera.pitch = (self.camera.pitch + delta.y * 0.009).clamp(-1.45, 1.45);
@@ -1445,7 +1463,9 @@ impl AtlasApp {
                             if response.hovered() {
                                 let delta = ui.input(|i| i.smooth_scroll_delta.y);
                                 if delta != 0.0 {
-                                    self.camera.zoom = (self.camera.zoom * (delta * 0.002).exp()).clamp(0.2, 5.0);
+                                    let cursor = ui.input(|i| i.pointer.hover_pos()).unwrap_or(rect.center());
+                                    let offset = (cursor - rect.center()) / rect.width().min(rect.height()).max(1.0);
+                                    self.camera.zoom_at((delta * 0.002).exp(), [offset.x, offset.y]);
                                 }
                             }
                             if response.double_clicked() {
@@ -1512,15 +1532,21 @@ impl AtlasApp {
             });
         });
         if let Some(m) = &self.current_model
-            && self.camera != self.rendered_camera
+            && (self.camera != self.rendered_camera || self.viewport_size != self.rendered_size)
             && !self.orbit_pending
             && self
                 .pool
                 .high
-                .try_send(Job::Orbit(m.clone(), self.detail_id, self.camera))
+                .try_send(Job::Orbit(
+                    m.clone(),
+                    self.detail_id,
+                    self.camera,
+                    self.viewport_size,
+                ))
                 .is_ok()
         {
             self.rendered_camera = self.camera;
+            self.rendered_size = self.viewport_size;
             self.orbit_pending = true;
         }
     }

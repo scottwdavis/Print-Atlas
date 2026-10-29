@@ -33,7 +33,7 @@ fn inspect(path: &Path) -> anyhow::Result<()> {
     let now = std::time::Instant::now();
     let value = match library::classify(&path) {
         FileKind::Model => {
-            let m = model::load_model(&path, 250_000)?;
+            let m = model::load_model_full(&path)?;
             serde_json::json!({"kind":"model","triangles":m.triangle_count,"display_triangles":m.vertices.len()/3,"min":m.bounds_min,"max":m.bounds_max,"palette":m.palette,"warnings":m.warnings})
         }
         kind => match preview::load_file(&path, kind, 1400)? {

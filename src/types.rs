@@ -70,6 +70,8 @@ pub struct Camera {
     pub yaw: f32,
     pub pitch: f32,
     pub zoom: f32,
+    /// Screen-right/down offset in units of the viewport's shorter side.
+    pub pan: [f32; 2],
 }
 impl Default for Camera {
     fn default() -> Self {
@@ -77,6 +79,20 @@ impl Default for Camera {
             yaw: -0.95,
             pitch: 0.55,
             zoom: 1.0,
+            pan: [0.0; 2],
         }
+    }
+}
+
+impl Camera {
+    /// Keep the model point under the cursor fixed while changing projection scale.
+    /// `cursor` is relative to viewport center, in shorter-side units (Y down).
+    pub fn zoom_at(&mut self, factor: f32, cursor: [f32; 2]) {
+        let next = (self.zoom * factor).clamp(0.02, 1000.0);
+        let ratio = next / self.zoom;
+        for (pan, cursor) in self.pan.iter_mut().zip(cursor) {
+            *pan = cursor + (*pan - cursor) * ratio;
+        }
+        self.zoom = next;
     }
 }

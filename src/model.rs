@@ -89,12 +89,34 @@ fn finish(
         warnings: appearance.warnings,
     })
 }
-fn stride(total: u64, limit: usize, appearance: &mut Appearance) -> u64 {
-    let stride = total.div_ceil(limit as u64).max(1);
-    if stride > 1 {
-        appearance.warn(format!("Display geometry is stride-sampled from {total} triangles; bounds include all original triangles."));
+#[derive(Clone, Copy)]
+enum GeometryDetail {
+    Full,
+    Budget(usize),
+}
+impl GeometryDetail {
+    fn stride(self, total: u64, appearance: &mut Appearance) -> u64 {
+        let stride = match self {
+            Self::Full => 1,
+            Self::Budget(limit) => total.div_ceil(limit as u64).max(1),
+        };
+        if stride > 1 {
+            appearance.warn(format!("Display geometry is stride-sampled from {total} triangles; bounds include all original triangles."));
+        }
+        stride
     }
-    stride
+}
+fn allocate_vertices(total: u64, stride: u64) -> Result<Vec<Vertex>> {
+    let count = total
+        .div_ceil(stride)
+        .checked_mul(3)
+        .and_then(|count| usize::try_from(count).ok())
+        .context("Model display vertex count exceeds addressable memory")?;
+    let mut vertices = Vec::new();
+    vertices
+        .try_reserve_exact(count)
+        .context("Not enough addressable memory for model display geometry")?;
+    Ok(vertices)
 }
 fn number(text: &str, label: &str) -> Result<f64> {
     let value: f64 = text
@@ -137,6 +159,19 @@ pub fn load_model(path: &Path, max_triangles: usize) -> Result<Model> {
         (1..=2_000_000).contains(&max_triangles),
         "max_triangles must be between 1 and 2000000."
     );
+    load_model_with_detail(path, GeometryDetail::Budget(max_triangles))
+}
+
+/// Load every printable triangle for interactive viewing, including painted 3MF
+/// subdivisions. Unlike `load_model`, this never samples geometry. Memory grows
+/// with the complete expanded mesh; an unrepresentable or failed display-buffer
+/// allocation is reported as an error rather than silently dropping triangles.
+/// Bounds and triangle_count still describe the original printable source mesh.
+pub fn load_model_full(path: &Path) -> Result<Model> {
+    load_model_with_detail(path, GeometryDetail::Full)
+}
+
+fn load_model_with_detail(path: &Path, detail: GeometryDetail) -> Result<Model> {
     match path
         .extension()
         .and_then(|v| v.to_str())
@@ -144,8 +179,8 @@ pub fn load_model(path: &Path, max_triangles: usize) -> Result<Model> {
         .to_ascii_lowercase()
         .as_str()
     {
-        "stl" => load_stl(path, max_triangles),
-        "3mf" => load_3mf(path, max_triangles),
+        "stl" => load_stl(path, detail),
+        "3mf" => load_3mf(path, detail),
         _ => bail!("Only STL and 3MF model files are supported."),
     }
 }
@@ -215,7 +250,7 @@ fn read_ascii<R: BufRead>(
     );
     Ok(count)
 }
-fn load_stl(path: &Path, limit: usize) -> Result<Model> {
+fn load_stl(path: &Path, detail: GeometryDetail) -> Result<Model> {
     let mut file = File::open(path)?;
     let size = file.metadata()?.len();
     let mut header = [0; 84];
@@ -246,8 +281,8 @@ fn load_stl(path: &Path, limit: usize) -> Result<Model> {
                 Ok(())
             },
         )?;
-        let stride = stride(count, limit, &mut appearance);
-        let mut vertices = Vec::with_capacity(count.div_ceil(stride) as usize * 3);
+        let stride = detail.stride(count, &mut appearance);
+        let mut vertices = allocate_vertices(count, stride)?;
         file.seek(SeekFrom::Start(0))?;
         let second_count = read_ascii(
             BufReader::with_capacity(128 * 1024, &mut file),
@@ -280,8 +315,8 @@ fn load_stl(path: &Path, limit: usize) -> Result<Model> {
     if expected < size {
         appearance.warn("Binary STL contains trailing data after its declared triangles.");
     }
-    let stride = stride(declared, limit, &mut appearance);
-    let mut vertices = Vec::with_capacity(declared.div_ceil(stride) as usize * 3);
+    let stride = detail.stride(declared, &mut appearance);
+    let mut vertices = allocate_vertices(declared, stride)?;
     let object_color = header[..80]
         .windows(6)
         .position(|v| v == b"COLOR=")
@@ -1315,7 +1350,7 @@ fn emit(
     }
     Ok(())
 }
-fn load_3mf(path: &Path, limit: usize) -> Result<Model> {
+fn load_3mf(path: &Path, detail: GeometryDetail) -> Result<Model> {
     let mut archive = Archive::open(path)?;
     let mut appearance = Appearance::default();
     let project = project_metadata(&mut archive, &mut appearance)?;
@@ -1438,8 +1473,8 @@ fn load_3mf(path: &Path, limit: usize) -> Result<Model> {
                 .context("Model triangle count overflow")?;
         }
     }
-    let stride = stride(expanded, limit, &mut appearance);
-    let mut vertices = Vec::with_capacity(expanded.div_ceil(stride) as usize * 3);
+    let stride = detail.stride(expanded, &mut appearance);
+    let mut vertices = allocate_vertices(expanded, stride)?;
     let mut leaf = 0;
     for instance in &walker.instances {
         for index in 0..instance.object.triangles.len() {
@@ -1573,6 +1608,91 @@ mod tests {
     }
     fn approx(a: f32, b: f32) {
         assert!((a - b).abs() < 0.0001, "{a} != {b}");
+    }
+
+    #[test]
+    fn full_loader_preserves_tessellated_surface_in_stl_and_3mf() {
+        const SIDE: u32 = 12;
+        let mut expected = Vec::new();
+        for y in 0..SIDE {
+            for x in 0..SIDE {
+                let (x, y) = (x as f32, y as f32);
+                expected.extend_from_slice(&[
+                    [x, y, 0.],
+                    [x + 1., y, 0.],
+                    [x + 1., y + 1., 0.],
+                    [x, y, 0.],
+                    [x + 1., y + 1., 0.],
+                    [x, y + 1., 0.],
+                ]);
+            }
+        }
+        let count = expected.len() / 3;
+        let mut ascii = String::from("solid surface\n");
+        let mut binary = vec![0; 84];
+        binary[80..84].copy_from_slice(&(count as u32).to_le_bytes());
+        let mut xml_vertices = String::new();
+        let mut xml_triangles = String::new();
+        for (index, triangle) in expected.as_chunks::<3>().0.iter().enumerate() {
+            ascii.push_str("facet normal 0 0 1\nouter loop\n");
+            binary.extend_from_slice(&[0; 12]);
+            for p in triangle {
+                ascii.push_str(&format!("vertex {} {} {}\n", p[0], p[1], p[2]));
+                xml_vertices.push_str(&format!(
+                    "<vertex x=\"{}\" y=\"{}\" z=\"{}\"/>",
+                    p[0], p[1], p[2]
+                ));
+                for coordinate in p {
+                    binary.extend_from_slice(&coordinate.to_le_bytes());
+                }
+            }
+            ascii.push_str("endloop\nendfacet\n");
+            binary.extend_from_slice(&[0; 2]);
+            let v = index * 3;
+            xml_triangles.push_str(&format!(
+                "<triangle v1=\"{v}\" v2=\"{}\" v3=\"{}\"/>",
+                v + 1,
+                v + 2
+            ));
+        }
+        ascii.push_str("endsolid surface\n");
+        let xml = model_xml(
+            &format!(
+                "<object id=\"1\"><mesh><vertices>{xml_vertices}</vertices><triangles>{xml_triangles}</triangles></mesh></object>"
+            ),
+            "<item objectid=\"1\"/>",
+        );
+        let files = [
+            TestFile::bytes("stl", ascii.as_bytes()),
+            TestFile::bytes("stl", &binary),
+            package(&[("3D/3dmodel.model", xml.as_bytes())]),
+        ];
+        for file in files {
+            let full = load_model_full(&file.0).unwrap();
+            assert_eq!(full.triangle_count, count as u64);
+            assert_eq!(
+                full.vertices.iter().map(|v| v.position).collect::<Vec<_>>(),
+                expected
+            );
+            assert!(!full.warnings.iter().any(|v| v.contains("stride-sampled")));
+            let sampled = load_model(&file.0, 37).unwrap();
+            assert!(sampled.vertices.len() < full.vertices.len());
+            assert!(sampled.vertices.len() <= 37 * 3);
+            assert_eq!(sampled.triangle_count, full.triangle_count);
+            assert_eq!(sampled.bounds_min, full.bounds_min);
+            assert_eq!(sampled.bounds_max, full.bounds_max);
+            assert!(
+                sampled
+                    .warnings
+                    .iter()
+                    .any(|v| v.contains("stride-sampled"))
+            );
+        }
+    }
+
+    #[test]
+    fn display_allocation_rejects_vertex_count_overflow() {
+        assert!(allocate_vertices(u64::MAX, 1).is_err());
     }
 
     #[test]
@@ -1852,7 +1972,7 @@ mod tests {
             ("3D/3dmodel.model", xml.as_bytes()),
             ("Metadata/project_settings.config", settings.as_bytes()),
         ]);
-        let model = load_model(&file.0, 10).unwrap();
+        let model = load_model_full(&file.0).unwrap();
         assert_eq!(model.triangle_count, 1);
         assert_eq!(model.vertices.len(), 6);
         assert!(model.vertices[..3].iter().all(|v| v.color == [1., 1., 0.]));

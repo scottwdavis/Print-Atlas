@@ -50,7 +50,7 @@ pub fn render_model(model: &Model, width: u32, height: u32, camera: Camera) -> R
         0.55
     };
     let zoom = if camera.zoom.is_finite() {
-        camera.zoom.clamp(0.05, 30.0)
+        camera.zoom.clamp(0.02, 1000.0)
     } else {
         1.0
     };
@@ -60,6 +60,13 @@ pub fn render_model(model: &Model, width: u32, height: u32, camera: Camera) -> R
     let up = Vec3::new(-cy * sp, -sy * sp, cp);
     let toward = Vec3::new(cy * cp, sy * cp, sp);
     let scale = width.min(height) as f32 * 0.45 * zoom;
+    let pan = camera.pan.map(|v| {
+        if v.is_finite() {
+            v * width.min(height) as f32
+        } else {
+            0.0
+        }
+    });
     let light = (toward * 0.7 - right * 0.3 + up * 0.6).normalize();
     let mut depth = vec![f32::NEG_INFINITY; count];
     for triangle in model.vertices.as_chunks::<3>().0 {
@@ -76,8 +83,8 @@ pub fn render_model(model: &Model, width: u32, height: u32, camera: Camera) -> R
             );
             valid &= positions[i].is_finite();
             screen[i] = Vec3::new(
-                width as f32 * 0.5 + positions[i].dot(right) * scale,
-                height as f32 * 0.5 - positions[i].dot(up) * scale,
+                width as f32 * 0.5 + pan[0] + positions[i].dot(right) * scale,
+                height as f32 * 0.5 + pan[1] - positions[i].dot(up) * scale,
                 positions[i].dot(toward),
             );
             colors[i] = Vec3::from_array(triangle[i].color).clamp(Vec3::ZERO, Vec3::ONE);
@@ -87,7 +94,7 @@ pub fn render_model(model: &Model, width: u32, height: u32, camera: Camera) -> R
             continue;
         }
         let normal = (positions[1] - positions[0]).cross(positions[2] - positions[0]);
-        if normal.length_squared() < 1.0e-20 {
+        if !normal.is_finite() || normal.length_squared() == 0.0 {
             continue;
         }
         // Two-sided shading intentionally keeps open STL surfaces and mirrored parts visible.
@@ -216,6 +223,7 @@ mod tests {
             yaw: 0.0,
             pitch: 0.0,
             zoom: 1.0,
+            pan: [0.0; 2],
         }
     }
     fn center(raster: &Raster) -> &[u8] {
@@ -287,5 +295,86 @@ mod tests {
         vertices[0].position[0] = f32::NAN;
         let raster = render_model(&model(vertices), 0, 0, front());
         assert_eq!(raster.rgba, [0; 4]);
+    }
+
+    #[test]
+    fn camera_pan_rerasterizes_geometry_outside_the_previous_frame() {
+        let vertices = [[0.0, 0.7, -0.15], [0.0, 1.0, -0.15], [0.0, 0.85, 0.15]]
+            .map(|position| Vertex {
+                position,
+                color: [1.0, 0.0, 0.0],
+            })
+            .to_vec();
+        let model = model(vertices);
+        let mut camera = Camera {
+            zoom: 8.0,
+            ..front()
+        };
+        let hidden = render_model(&model, 128, 128, camera);
+        assert!(hidden.rgba.as_chunks::<4>().0.iter().all(|p| p[3] == 0));
+
+        let fitted = render_model(&model, 128, 128, front());
+        assert!(fitted.rgba.as_chunks::<4>().0.iter().any(|p| p[0] > 100));
+        // The triangle was never present in the prior raster. Projection-space
+        // panning brings it back, including coverage right up to the canvas edge.
+        camera.pan[0] = -1.3;
+        let edge = render_model(&model, 128, 128, camera);
+        assert!(edge.rgba.as_chunks::<4>().0.iter().any(|p| p[0] > 100));
+        assert!(
+            (0..edge.height).any(|y| {
+                edge.rgba[((y * edge.width + edge.width - 1) * 4 + 3) as usize] == 255
+            })
+        );
+        camera.pan[0] = -0.85 * 0.45 * camera.zoom / 3.0_f32.sqrt();
+        let centered = render_model(&model, 128, 128, camera);
+        assert!(center(&centered)[0] > 100);
+        assert_eq!(center(&centered)[3], 255);
+    }
+
+    #[test]
+    fn rectangular_viewports_fit_without_clipping_or_distortion() {
+        let model = model(triangle(0.0, [1.0; 3]));
+        for (width, height) in [(320, 96), (96, 320)] {
+            let raster = render_model(&model, width, height, front());
+            assert_eq!((raster.width, raster.height), (width, height));
+            let mut min = [width, height];
+            let mut max = [0, 0];
+            for (index, pixel) in raster.rgba.as_chunks::<4>().0.iter().enumerate() {
+                if pixel[3] != 0 {
+                    let x = index as u32 % width;
+                    let y = index as u32 / width;
+                    min[0] = min[0].min(x);
+                    min[1] = min[1].min(y);
+                    max[0] = max[0].max(x);
+                    max[1] = max[1].max(y);
+                }
+            }
+            assert!(min[0] > 0 && min[1] > 0);
+            assert!(max[0] < width - 1 && max[1] < height - 1);
+            assert!((max[0] - min[0]).abs_diff(max[1] - min[1]) <= 1);
+        }
+        assert_eq!(bounded_dimensions(8000, 2000), (4096, 1024));
+        assert_eq!(bounded_dimensions(2000, 8000), (1024, 4096));
+    }
+
+    #[test]
+    fn cursor_zoom_preserves_anchor_across_the_full_zoom_range() {
+        let mut camera = front();
+        camera.pan = [0.1, -0.2];
+        let cursor = [0.3, -0.4];
+        let anchor = [
+            (cursor[0] - camera.pan[0]) / camera.zoom,
+            (cursor[1] - camera.pan[1]) / camera.zoom,
+        ];
+        for factor in [10.0, 10.0, 100.0, 0.000001] {
+            camera.zoom_at(factor, cursor);
+            for axis in 0..2 {
+                let projected = camera.pan[axis] + anchor[axis] * camera.zoom;
+                assert!((projected - cursor[axis]).abs() < 0.0001);
+            }
+        }
+        assert_eq!(camera.zoom, 0.02);
+        camera.zoom_at(1.0e9, cursor);
+        assert_eq!(camera.zoom, 1000.0);
     }
 }

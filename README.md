@@ -7,8 +7,8 @@ A native **Rust** Windows application for organizing a 3D-printing library: STL 
 Windows x64, Windows 10 version 1809 or newer, with a working OpenGL graphics driver.
 
 - **Installer:** run `Print-Atlas-Setup.exe`. Installs for the current user without administrator access. Optional Start menu and desktop shortcuts are offered.
-- **Portable:** extract the complete `Print-Atlas-2.0.0-windows-x64.zip`, then run `Print Atlas.exe`. Keep the accompanying `runtime` directory and third-party notices beside the executable.
-- **This source checkout:** after packaging, run `release/Print Atlas 2.0.0.exe`. Manual shortcuts should target this versioned launcher.
+- **Portable:** extract the complete `Print-Atlas-2.0.1-windows-x64.zip`, then run `Print Atlas.exe`. Keep the accompanying `runtime` directory and third-party notices beside the executable.
+- **This source checkout:** after packaging, run `release/Print Atlas 2.0.1.exe`. Manual shortcuts should target this versioned launcher.
 
 The executable and installer are unsigned. Windows SmartScreen may show an unknown-publisher warning. Downloads include `SHA256SUMS.txt`; verify an artifact with `Get-FileHash -Algorithm SHA256`.
 
@@ -32,10 +32,10 @@ The tree and grid mount only visible rows. Thumbnail work runs on bounded backgr
 
 - ASCII and binary STL, including common binary color conventions.
 - Bambu 3MF saved plate images, including multiple plates and original saved colors. Choose a plate from its dropdown.
-- **Interactive 3D** uses a native Rust, depth-buffered renderer. Drag to orbit, scroll to zoom, right-drag or Shift-drag to pan, and **Reset view** to restore the camera.
+- **Interactive 3D** uses a native Rust, depth-buffered renderer. Drag to orbit, scroll to zoom around the cursor, right-drag or Shift-drag to pan, and **Reset view** to restore the camera. Pan and zoom rerender geometry in the actual viewport rather than moving a cropped image; zoom supports 0.02×–1000×.
 - Nested/external in-archive 3MF components, unit conversion, standard materials and vertex colors, object/part filament assignments, recursive Bambu triangle painting, and modifier exclusion.
 
-Display geometry is capped at 250,000 triangles for inspection and 120,000 for generated thumbnails. Larger files use stride sampling, not watertight mesh simplification; small surfaces may appear incomplete. Dimensions still include all original triangles. Source models are never simplified or rewritten. Referenced 3MF source geometry must fit in memory even when the display output is sampled.
+Interactive inspection retains all printable triangles, including painted 3MF subdivisions, so surfaces are not perforated by triangle sampling. Geometry memory scales with the complete mesh; very large models may take longer to open or report an allocation error. Generated thumbnails retain a 120,000-triangle sampling budget and can show incomplete small surfaces. Dimensions include all original triangles. Source models are never simplified or rewritten.
 
 Textures, transparency, composite materials, and physical multi-color filament appearances are not fully reproduced in interactive 3D. Unsupported appearance is reported rather than invented. Saved Bambu plate renders remain the reference for exact slicer appearance. A sliced-only project can show saved plates without providing an interactive mesh.
 
@@ -100,11 +100,11 @@ powershell -ExecutionPolicy Bypass -File scripts/package.ps1
 This provisions verified build tools/runtime, performs a locked optimized Windows x64 build with static CRT, generates complete Rust dependency notices, and creates:
 
 ```text
-release/Print Atlas 2.0.0.exe
+release/Print Atlas 2.0.1.exe
 release/runtime/
 release/third-party-licenses/
 release/Print-Atlas-Setup.exe
-release/Print-Atlas-2.0.0-windows-x64.zip
+release/Print-Atlas-2.0.1-windows-x64.zip
 release/SHA256SUMS.txt
 ```
 
@@ -115,7 +115,7 @@ Keep `Cargo.lock` committed. Generated binaries, caches, downloaded runtime DLLs
 This directory is a local Git repository on `main`. No remote is configured and nothing has been uploaded. Add your GitHub repository as `origin` and push when ready.
 
 - `.github/workflows/ci.yml`: Windows formatting, strict Clippy, and locked tests on pushes and pull requests.
-- `.github/workflows/release.yml`: pushing a version tag such as **`v2.0.0`** builds the installer, portable ZIP, and checksums and publishes them as GitHub release assets. The tag must match `Cargo.toml`'s version.
+- `.github/workflows/release.yml`: pushing a version tag such as **`v2.0.1`** builds the installer, portable ZIP, and checksums and publishes them as GitHub release assets. The tag must match `Cargo.toml`'s version.
 - Release publishing receives `contents: write` only in its release job. No repository owner/name or credentials are hardcoded.
 
 Local verification does not claim a hosted GitHub Actions run. The hosted workflow executes after you push.
@@ -130,6 +130,10 @@ Local verification does not claim a hosted GitHub Actions run. The hosted workfl
 - `src/preview.rs`: image/text/PDF decoding and bounds; `src/render.rs`: native 3D rasterization.
 - `src/main.rs`, `src/types.rs`: startup/diagnostic CLI and shared data types.
 - `scripts/`, `installer/`, `.github/workflows/`: verified runtime/build-tool acquisition, dependency notices, packaging, installation, and CI/releases.
+
+## 2.0.1
+
+Fixed incomplete interactive surfaces by retaining complete meshes. Camera pan and cursor-anchored zoom now happen before rasterization at the viewport's aspect ratio, eliminating the cropped-image barrier and the previous 5× zoom limit. Camera and resize work coalesces to the latest requested view.
 
 ## 2.0.0
 
