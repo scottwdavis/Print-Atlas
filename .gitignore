@@ -1,0 +1,16 @@
+/target/
+/release/
+/runtime/
+/.tools/
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.log
+.DS_Store
+Thumbs.db
+Desktop.ini
+/.vscode/
+/.idea/
+
+# Cargo.lock is intentionally tracked for reproducible application releases.

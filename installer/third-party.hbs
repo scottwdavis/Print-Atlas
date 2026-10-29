@@ -1,0 +1,25 @@
+PRINT ATLAS - THIRD-PARTY RUST DEPENDENCY LICENSES
+
+These terms apply to the dependencies identified below, not to Print Atlas source.
+This report is generated from the locked Windows x64 dependency graph using
+cargo-about. Original packaged notices and bundled-font licenses are also
+preserved in the crates/ directory. PDFium notices are under runtime/licenses/.
+
+Unmodified dependency source archives can be obtained from the crates.io URLs
+listed below and in SOURCES.txt. The upstream project repositories are also
+identified where supplied by the package authors.
+
+{{#each licenses}}
+===============================================================================
+{{{name}}} ({{{id}}})
+===============================================================================
+Used by:
+{{#each used_by}}
+- {{{crate.name}}} {{{crate.version}}}
+  Repository: {{{crate.repository}}}
+  Source archive: https://crates.io/api/v1/crates/{{{crate.name}}}/{{{crate.version}}}/download
+{{/each}}
+
+{{{text}}}
+
+{{/each}}

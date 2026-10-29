@@ -1,0 +1,40 @@
+[package]
+name = "print-atlas"
+version = "2.0.0"
+edition = "2024"
+rust-version = "1.98"
+description = "A native visual library for 3D printing models, images and documents"
+build = "build.rs"
+publish = false
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "accesskit"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "ico", "tiff"] }
+avif-decode = { version = "=3.0.0", default-features = false }
+avif-parse = "=2.1.0"
+zip = { version = "4", default-features = false, features = ["deflate"] }
+quick-xml = "0.38"
+roxmltree = "0.21"
+glam = "0.30"
+sha2 = "0.10"
+crossbeam-channel = "0.5"
+dirs = "6"
+walkdir = "2"
+rfd = "0.15"
+open = "5"
+resvg = "0.45"
+pdfium-render = { version = "=0.8.37", default-features = false, features = ["pdfium_7543", "thread_safe"] }
+
+[build-dependencies]
+winresource = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

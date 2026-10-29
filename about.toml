@@ -1,0 +1,26 @@
+# Binary dependency-license selection only; this does not license Print Atlas source.
+# Prefer Apache where a dependency offers Apache OR MIT; retain original notices too.
+accepted = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "BSL-1.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "0BSD",
+    "CC0-1.0",
+    "Unlicense",
+    "Apache-2.0 WITH LLVM-exception",
+    "MPL-2.0",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]
+targets = ["x86_64-pc-windows-msvc"]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+# Exclude the non-published local executable package, whose source has no
+# license grant. GitHub executable releases remain unaffected.
+private = { ignore = true }
