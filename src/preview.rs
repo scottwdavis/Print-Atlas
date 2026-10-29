@@ -37,6 +37,9 @@ pub struct PdfPage {
 
 pub fn load_file(path: &Path, kind: FileKind, max_side: u32) -> Result<Preview> {
     match kind {
+        FileKind::Blender => Ok(crate::blend::load_thumbnail(path, max_side)?
+            .map(Preview::Image)
+            .unwrap_or(Preview::Other)),
         FileKind::Image => {
             let bytes = read_bounded(path, SOURCE_LIMIT, true)?;
             let raster = if path

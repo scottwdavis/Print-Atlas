@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod app;
+mod blend;
 mod library;
 mod model;
 mod preview;
@@ -38,7 +39,11 @@ fn inspect(path: &Path) -> anyhow::Result<()> {
         }
         kind => match preview::load_file(&path, kind, 1400)? {
             preview::Preview::Image(r) => {
-                serde_json::json!({"kind":"image","width":r.width,"height":r.height})
+                if kind == FileKind::Blender {
+                    serde_json::json!({"kind":"blender","preview":"image","source":"saved embedded thumbnail","width":r.width,"height":r.height})
+                } else {
+                    serde_json::json!({"kind":"image","width":r.width,"height":r.height})
+                }
             }
             preview::Preview::Text {
                 text,
@@ -49,6 +54,9 @@ fn inspect(path: &Path) -> anyhow::Result<()> {
             }
             preview::Preview::Pdf(p) => {
                 serde_json::json!({"kind":"pdf","pages":p.page_count,"width":p.raster.width,"height":p.raster.height,"text":p.text})
+            }
+            preview::Preview::Other if kind == FileKind::Blender => {
+                serde_json::json!({"kind":"blender","preview":null,"description":"No embedded thumbnail saved in this Blender project."})
             }
             preview::Preview::Other => serde_json::json!({"kind":"other"}),
         },

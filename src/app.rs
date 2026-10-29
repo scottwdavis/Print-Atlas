@@ -251,8 +251,18 @@ fn thumbnail(file: &FileEntry, key: &str) -> anyhow::Result<(Option<Raster>, Str
         ));
     }
     match preview::load_file(&file.path, file.kind, 420)? {
-        Preview::Image(r) => Ok((Some(r), String::new())),
+        Preview::Image(r) => Ok((
+            Some(r),
+            if file.kind == FileKind::Blender {
+                "Saved embedded thumbnail".into()
+            } else {
+                String::new()
+            },
+        )),
         Preview::Text { text, .. } => Ok((None, text.chars().take(260).collect())),
+        Preview::Other if file.kind == FileKind::Blender => {
+            Ok((None, "No embedded thumbnail".into()))
+        }
         _ => Ok((None, String::new())),
     }
 }
@@ -622,7 +632,7 @@ impl AtlasApp {
                 }
                 let matches = match self.filter {
                     Filter::All => true,
-                    Filter::Models => f.kind == FileKind::Model,
+                    Filter::Models => matches!(f.kind, FileKind::Model | FileKind::Blender),
                     Filter::Images => f.kind == FileKind::Image,
                     Filter::Documents => matches!(f.kind, FileKind::Document | FileKind::Pdf),
                     Filter::Other => f.kind == FileKind::Other,
@@ -880,6 +890,7 @@ impl AtlasApp {
                                         ui.add_space(*depth as f32 * 13. + 20.);
                                         let icon = match file.kind {
                                             FileKind::Model => "3D",
+                                            FileKind::Blender => "BLEND",
                                             FileKind::Image => "IMG",
                                             FileKind::Pdf => "PDF",
                                             FileKind::Document => "TXT",
@@ -1135,6 +1146,9 @@ impl AtlasApp {
                                                             )
                                                             .truncate(),
                                                         );
+                                                        if file.kind == FileKind::Blender {
+                                                            ui.small(&text);
+                                                        }
                                                     });
                                                 });
                                             } else {
@@ -1164,8 +1178,13 @@ impl AtlasApp {
                                                             Some((file.path.clone(), !is_favorite));
                                                     }
                                                 });
-                                                let area =
-                                                    Vec2::new(width - 20., (height - 87.).max(30.));
+                                                let caption =
+                                                    file.kind == FileKind::Blender && tex.is_some();
+                                                let area = Vec2::new(
+                                                    width - 20.,
+                                                    (height - if caption { 105. } else { 87. })
+                                                        .max(30.),
+                                                );
                                                 let (rect, _) = ui.allocate_exact_size(
                                                     area,
                                                     egui::Sense::hover(),
@@ -1194,6 +1213,10 @@ impl AtlasApp {
                                                             "PDF"
                                                         } else if file.kind == FileKind::Other {
                                                             "FILE"
+                                                        } else if file.kind == FileKind::Blender
+                                                            && text == "No embedded thumbnail"
+                                                        {
+                                                            "No embedded\nthumbnail"
                                                         } else {
                                                             &text
                                                         },
@@ -1219,6 +1242,15 @@ impl AtlasApp {
                                                     )
                                                     .truncate(),
                                                 );
+                                                if caption {
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            RichText::new(&text).small().weak(),
+                                                        )
+                                                        .truncate(),
+                                                    )
+                                                    .on_hover_text(&text);
+                                                }
                                             }
                                         },
                                     );
@@ -1429,6 +1461,9 @@ impl AtlasApp {
                             });
                         }
                     } else if let Some(texture) = self.asset.as_ref().map(|a| a.texture.clone()) {
+                        if file.kind == FileKind::Blender {
+                            ui.small("Saved embedded thumbnail from the Blender project · Not a live scene render");
+                        }
                         let area = Vec2::new(ui.available_width(), (ui.available_height() - 75.0).max(150.0));
                         let (rect, response) = ui.allocate_exact_size(area, egui::Sense::click_and_drag());
                         ui.painter().rect_filled(rect, 8.0, Color32::from_rgb(32, 39, 47));
@@ -1478,7 +1513,12 @@ impl AtlasApp {
                             ui.small("Drag to pan · Use + / − to zoom");
                         }
                     } else if !self.loading && self.error.is_empty() {
-                        ui.label("No inline preview for this format. Open the original in its associated application.");
+                        if file.kind == FileKind::Blender {
+                            ui.label("No embedded thumbnail saved in this Blender project.");
+                            ui.small("Only the saved thumbnail is read. Blender is not launched and the scene is not evaluated.");
+                        } else {
+                            ui.label("No inline preview for this format. Open the original in its associated application.");
+                        }
                     }
                     if let Some(m) = &self.current_model {
                         ui.label(format!("{:.1} × {:.1} × {:.1} mm · {} source triangles · {} displayed",

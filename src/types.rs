@@ -5,6 +5,7 @@ use std::path::PathBuf;
 #[serde(rename_all = "lowercase")]
 pub enum FileKind {
     Model,
+    Blender,
     Image,
     Document,
     Pdf,
@@ -14,6 +15,7 @@ impl FileKind {
     pub fn label(self) -> &'static str {
         match self {
             Self::Model => "3D model",
+            Self::Blender => "Blender project",
             Self::Image => "Image",
             Self::Document => "Text document",
             Self::Pdf => "PDF",

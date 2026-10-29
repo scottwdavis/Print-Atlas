@@ -1,6 +1,6 @@
 [package]
 name = "print-atlas"
-version = "2.0.1"
+version = "2.0.2"
 edition = "2024"
 rust-version = "1.98"
 description = "A native visual library for 3D printing models, images and documents"
@@ -16,6 +16,8 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 avif-decode = { version = "=3.0.0", default-features = false }
 avif-parse = "=2.1.0"
 zip = { version = "4", default-features = false, features = ["deflate"] }
+flate2 = "1"
+zstd = { version = "0.13", default-features = false }
 quick-xml = "0.38"
 roxmltree = "0.21"
 glam = "0.30"

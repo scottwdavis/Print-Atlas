@@ -24,6 +24,7 @@ pub fn classify(path: &Path) -> FileKind {
     let ext = extension(path);
     match ext.as_str() {
         "stl" | "3mf" => FileKind::Model,
+        "blend" => FileKind::Blender,
         "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "svg" | "ico" | "avif" | "tif"
         | "tiff" => FileKind::Image,
         "pdf" => FileKind::Pdf,
@@ -1521,6 +1522,10 @@ mod tests {
         }
         for (name, kind) in [
             ("part.STL", FileKind::Model),
+            ("scene.blend", FileKind::Blender),
+            ("scene.BLEND", FileKind::Blender),
+            ("scene.BlEnD", FileKind::Blender),
+            ("scene.blend1", FileKind::Other),
             ("photo.TIFF", FileKind::Image),
             ("notes.md", FileKind::Document),
             ("manual.PDF", FileKind::Pdf),
