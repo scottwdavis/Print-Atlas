@@ -55,6 +55,8 @@ jobs:
 
             Both packages include the PDFium runtime and its license notices. No Rust, Node.js, browser runtime, or separate PDF installation is required. The installer and executable are not code-signed; Windows SmartScreen may show an unknown-publisher warning.
 
+            Project source is licensed under GPLv3. The corresponding source for this build is available through this release's **Source code** downloads and tagged repository. Project and third-party license notices are included in the packages.
+
             Verify downloads against **SHA256SUMS.txt** using PowerShell `Get-FileHash -Algorithm SHA256`.
           files: |
             release/Print-Atlas-Setup.exe

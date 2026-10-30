@@ -131,6 +131,8 @@ Local verification does not claim a hosted GitHub Actions run. The hosted workfl
 
 Project source licensing is provided in [LICENSE](LICENSE) (GNU General Public License, version 3). Third-party dependencies retain their own licenses: dependency attribution, license texts, source links, font notices, and PDFium notices are included in both distribution formats. The package is marked `publish = false` only to prevent accidental crates.io publication and to exclude project-owned source from third-party notice generation; GitHub source and binary releases are unaffected.
 
+The installer and portable ZIP also include the project's `LICENSE`. Each tagged GitHub release provides corresponding source through its **Source code** downloads alongside the binary assets.
+
 ## Source layout
 
 - `src/app.rs`: native tree/grid, inline workspace, bounded preview workers, annotations, and file actions.

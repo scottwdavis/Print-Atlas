@@ -156,6 +156,7 @@ try {
         Copy-Item -LiteralPath $binary -Destination (Join-Path $portable 'Print Atlas.exe')
         Copy-Item -LiteralPath (Join-Path $root 'runtime') -Destination (Join-Path $portable 'runtime') -Recurse
         Copy-Item -LiteralPath (Join-Path $root 'README.md') -Destination (Join-Path $portable 'README.md')
+        Copy-Item -LiteralPath (Join-Path $root 'LICENSE') -Destination (Join-Path $portable 'LICENSE')
         & (Join-Path $PSScriptRoot 'generate-notices.ps1') -Destination (Join-Path $portable 'third-party-licenses')
 
         # Crate licenses can predate 1980; ZIP timestamps must be within 1980..2107.
