@@ -89,26 +89,8 @@ fn finish(
         warnings: appearance.warnings,
     })
 }
-#[derive(Clone, Copy)]
-enum GeometryDetail {
-    Full,
-    Budget(usize),
-}
-impl GeometryDetail {
-    fn stride(self, total: u64, appearance: &mut Appearance) -> u64 {
-        let stride = match self {
-            Self::Full => 1,
-            Self::Budget(limit) => total.div_ceil(limit as u64).max(1),
-        };
-        if stride > 1 {
-            appearance.warn(format!("Display geometry is stride-sampled from {total} triangles; bounds include all original triangles."));
-        }
-        stride
-    }
-}
-fn allocate_vertices(total: u64, stride: u64) -> Result<Vec<Vertex>> {
+fn allocate_vertices(total: u64) -> Result<Vec<Vertex>> {
     let count = total
-        .div_ceil(stride)
         .checked_mul(3)
         .and_then(|count| usize::try_from(count).ok())
         .context("Model display vertex count exceeds addressable memory")?;
@@ -152,26 +134,11 @@ fn parse_color(text: &str, appearance: &mut Appearance) -> Option<Rgb> {
     ])
 }
 
-/// Load printable geometry, retaining no more than `max_triangles` display facets.
-/// Bounds and triangle_count always describe the full printable source mesh.
-pub fn load_model(path: &Path, max_triangles: usize) -> Result<Model> {
-    ensure!(
-        (1..=2_000_000).contains(&max_triangles),
-        "max_triangles must be between 1 and 2000000."
-    );
-    load_model_with_detail(path, GeometryDetail::Budget(max_triangles))
-}
-
-/// Load every printable triangle for interactive viewing, including painted 3MF
-/// subdivisions. Unlike `load_model`, this never samples geometry. Memory grows
-/// with the complete expanded mesh; an unrepresentable or failed display-buffer
-/// allocation is reported as an error rather than silently dropping triangles.
-/// Bounds and triangle_count still describe the original printable source mesh.
+/// Load every printable triangle, including painted 3MF subdivisions. Memory
+/// grows with the complete expanded mesh; failed display-buffer allocations are
+/// reported as errors rather than silently dropping triangles.
+/// Bounds and triangle_count describe the original printable source mesh.
 pub fn load_model_full(path: &Path) -> Result<Model> {
-    load_model_with_detail(path, GeometryDetail::Full)
-}
-
-fn load_model_with_detail(path: &Path, detail: GeometryDetail) -> Result<Model> {
     match path
         .extension()
         .and_then(|v| v.to_str())
@@ -179,8 +146,8 @@ fn load_model_with_detail(path: &Path, detail: GeometryDetail) -> Result<Model> 
         .to_ascii_lowercase()
         .as_str()
     {
-        "stl" => load_stl(path, detail),
-        "3mf" => load_3mf(path, detail),
+        "stl" => load_stl(path),
+        "3mf" => load_3mf(path),
         _ => bail!("Only STL and 3MF model files are supported."),
     }
 }
@@ -250,133 +217,175 @@ fn read_ascii<R: BufRead>(
     );
     Ok(count)
 }
-fn load_stl(path: &Path, detail: GeometryDetail) -> Result<Model> {
-    let mut file = File::open(path)?;
-    let size = file.metadata()?.len();
-    let mut header = [0; 84];
-    let header_len = size.min(84) as usize;
-    file.read_exact(&mut header[..header_len])?;
-    let declared = if header_len == 84 {
-        u32::from_le_bytes(header[80..84].try_into().unwrap()) as u64
-    } else {
-        0
-    };
-    let expected = 84 + declared * 50;
-    let prefix = String::from_utf8_lossy(&header[..header_len]);
-    let ascii = prefix
-        .split_whitespace()
-        .next()
-        .is_some_and(|w| w.eq_ignore_ascii_case("solid"));
-    let binary = header_len == 84 && (expected == size || !ascii || header.contains(&0));
-    file.seek(SeekFrom::Start(0))?;
-    let mut appearance = Appearance::default();
-    let mut bounds = Bounds::new();
-    if !binary {
-        let count = read_ascii(
-            BufReader::with_capacity(128 * 1024, &mut file),
-            |triangle, _| {
-                for p in triangle {
-                    bounds.include(p)?;
-                }
-                Ok(())
-            },
-        )?;
-        let stride = detail.stride(count, &mut appearance);
-        let mut vertices = allocate_vertices(count, stride)?;
-        file.seek(SeekFrom::Start(0))?;
-        let second_count = read_ascii(
-            BufReader::with_capacity(128 * 1024, &mut file),
-            |triangle, index| {
-                if index % stride == 0 {
-                    for p in triangle {
-                        ensure!(
-                            p.iter().all(|v| (*v as f32).is_finite()),
-                            "Model coordinates exceed Float32 display range."
-                        );
-                        vertices.push(Vertex {
-                            position: p.map(|v| v as f32),
-                            color: DEFAULT_RGB,
-                        });
-                    }
-                }
-                Ok(())
-            },
-        )?;
+/// Source geometry information returned after visiting every STL facet.
+#[derive(Debug, PartialEq)]
+pub struct StlInfo {
+    pub triangle_count: u64,
+    pub bounds_min: [f32; 3],
+    pub bounds_max: [f32; 3],
+}
+
+/// Visit all STL facets in source order without retaining geometry. Coordinates
+/// and colors match `load_model_full`, including degenerate triangles. Callback
+/// errors stop parsing immediately; a successful return validates the full file.
+pub fn visit_stl(path: &Path, mut visit: impl FnMut([Vertex; 3]) -> Result<()>) -> Result<StlInfo> {
+    StlReader::open(path)?.scan(|triangle, _| visit(triangle))
+}
+
+struct StlReader {
+    file: File,
+    size: u64,
+    declared: u64,
+    binary: bool,
+    trailing: bool,
+    object_color: Option<Rgb>,
+}
+
+impl StlReader {
+    fn open(path: &Path) -> Result<Self> {
+        let mut file = File::open(path)?;
+        let size = file.metadata()?.len();
+        let mut header = [0; 84];
+        let header_len = size.min(84) as usize;
+        file.read_exact(&mut header[..header_len])?;
+        let declared = if header_len == 84 {
+            u32::from_le_bytes(header[80..84].try_into().unwrap()) as u64
+        } else {
+            0
+        };
+        let expected = 84 + declared * 50;
+        let prefix = String::from_utf8_lossy(&header[..header_len]);
+        let ascii = prefix
+            .split_whitespace()
+            .next()
+            .is_some_and(|w| w.eq_ignore_ascii_case("solid"));
+        let binary = header_len == 84 && (expected == size || !ascii || header.contains(&0));
         ensure!(
-            second_count == count && file.metadata()?.len() == size,
-            "ASCII STL changed while reading."
+            !binary || expected <= size,
+            "Binary STL is truncated: header declares {declared} triangles."
         );
-        return finish(vertices, count, bounds, appearance);
+        let object_color = header[..80]
+            .windows(6)
+            .position(|v| v == b"COLOR=")
+            .filter(|p| p + 10 <= 80)
+            .map(|p| {
+                [
+                    header[p + 6] as f32 / 255.,
+                    header[p + 7] as f32 / 255.,
+                    header[p + 8] as f32 / 255.,
+                ]
+            });
+        Ok(Self {
+            file,
+            size,
+            declared,
+            binary,
+            trailing: binary && expected < size,
+            object_color,
+        })
     }
-    ensure!(
-        expected <= size,
-        "Binary STL is truncated: header declares {declared} triangles."
-    );
-    if expected < size {
+
+    fn scan(
+        &mut self,
+        mut visit: impl FnMut([Vertex; 3], Option<Rgb>) -> Result<()>,
+    ) -> Result<StlInfo> {
+        let mut bounds = Bounds::new();
+        let mut emit = |triangle: Triangle, color: Option<Rgb>| {
+            for p in triangle {
+                bounds.include(p)?;
+            }
+            visit(
+                triangle.map(|p| Vertex {
+                    position: p.map(|v| v as f32),
+                    color: color.unwrap_or(DEFAULT_RGB),
+                }),
+                color,
+            )
+        };
+        let count = if self.binary {
+            self.file.seek(SeekFrom::Start(84))?;
+            let mut reader = BufReader::with_capacity(50 * 4096, &mut self.file);
+            let mut facet = [0u8; 50];
+            for _ in 0..self.declared {
+                reader
+                    .read_exact(&mut facet)
+                    .context("Binary STL changed or was truncated while reading")?;
+                let attr = u16::from_le_bytes([facet[48], facet[49]]);
+                let color = if let Some(color) = self.object_color {
+                    Some(if attr & 0x8000 != 0 {
+                        color
+                    } else {
+                        [
+                            (attr & 31) as f32 / 31.,
+                            ((attr >> 5) & 31) as f32 / 31.,
+                            ((attr >> 10) & 31) as f32 / 31.,
+                        ]
+                    })
+                } else if attr & 0x8000 != 0 {
+                    Some([
+                        ((attr >> 10) & 31) as f32 / 31.,
+                        ((attr >> 5) & 31) as f32 / 31.,
+                        (attr & 31) as f32 / 31.,
+                    ])
+                } else {
+                    None
+                };
+                let triangle = std::array::from_fn(|vertex| {
+                    std::array::from_fn(|k| {
+                        let offset = 12 + vertex * 12 + k * 4;
+                        f32::from_le_bytes(facet[offset..offset + 4].try_into().unwrap()) as f64
+                    })
+                });
+                emit(triangle, color)?;
+            }
+            self.declared
+        } else {
+            self.file.seek(SeekFrom::Start(0))?;
+            read_ascii(
+                BufReader::with_capacity(128 * 1024, &mut self.file),
+                |triangle, _| emit(triangle, None),
+            )?
+        };
+        ensure!(
+            self.file.metadata()?.len() == self.size,
+            "STL changed while reading."
+        );
+        ensure!(count > 0, "No printable mesh triangles were found.");
+        Ok(StlInfo {
+            triangle_count: count,
+            bounds_min: bounds.min.map(|v| v as f32),
+            bounds_max: bounds.max.map(|v| v as f32),
+        })
+    }
+}
+
+fn load_stl(path: &Path) -> Result<Model> {
+    let mut source = StlReader::open(path)?;
+    let info = source.scan(|_, _| Ok(()))?;
+    let mut vertices = allocate_vertices(info.triangle_count)?;
+    let mut appearance = Appearance::default();
+    if source.trailing {
         appearance.warn("Binary STL contains trailing data after its declared triangles.");
     }
-    let stride = detail.stride(declared, &mut appearance);
-    let mut vertices = allocate_vertices(declared, stride)?;
-    let object_color = header[..80]
-        .windows(6)
-        .position(|v| v == b"COLOR=")
-        .filter(|p| p + 10 <= 80)
-        .map(|p| {
-            [
-                header[p + 6] as f32 / 255.,
-                header[p + 7] as f32 / 255.,
-                header[p + 8] as f32 / 255.,
-            ]
-        });
-    file.seek(SeekFrom::Start(84))?;
-    let mut reader = BufReader::with_capacity(50 * 4096, file);
-    let mut facet = [0u8; 50];
-    for index in 0..declared {
-        reader
-            .read_exact(&mut facet)
-            .context("Binary STL changed or was truncated while reading")?;
-        let attr = u16::from_le_bytes([facet[48], facet[49]]);
-        let rgb = if let Some(color) = object_color {
-            Some(if attr & 0x8000 != 0 {
-                color
-            } else {
-                [
-                    (attr & 31) as f32 / 31.,
-                    ((attr >> 5) & 31) as f32 / 31.,
-                    ((attr >> 10) & 31) as f32 / 31.,
-                ]
-            })
-        } else if attr & 0x8000 != 0 {
-            Some([
-                ((attr >> 10) & 31) as f32 / 31.,
-                ((attr >> 5) & 31) as f32 / 31.,
-                (attr & 31) as f32 / 31.,
-            ])
-        } else {
-            None
-        };
-        if let Some(rgb) = rgb {
-            appearance.remember(rgb);
+    let second = source.scan(|triangle, color| {
+        if let Some(color) = color {
+            appearance.remember(color);
         }
-        for vertex in 0..3 {
-            let mut p = [0.; 3];
-            for (k, value) in p.iter_mut().enumerate() {
-                let offset = 12 + vertex * 12 + k * 4;
-                *value = f32::from_le_bytes(facet[offset..offset + 4].try_into().unwrap()) as f64;
-            }
-            bounds.include(p)?;
-            if index % stride == 0 {
-                vertices.push(Vertex {
-                    position: p.map(|v| v as f32),
-                    color: rgb.unwrap_or(DEFAULT_RGB),
-                });
-            }
-        }
-    }
+        vertices.extend_from_slice(&triangle);
+        Ok(())
+    })?;
+    ensure!(second == info, "STL changed while reading.");
     if !appearance.palette.is_empty() {
         appearance.warn("STL colors use the non-standard Magics/VisCAM convention; STL has no standard color encoding.");
     }
-    finish(vertices, declared, bounds, appearance)
+    Ok(Model {
+        vertices,
+        triangle_count: info.triangle_count,
+        bounds_min: info.bounds_min,
+        bounds_max: info.bounds_max,
+        palette: appearance.palette,
+        warnings: appearance.warnings,
+    })
 }
 
 fn local(name: &[u8]) -> &[u8] {
@@ -1327,30 +1336,20 @@ fn triangle(instance: &Instance<'_>, index: usize) -> Triangle {
     instance.object.triangles[index]
         .map(|v| point(instance.matrix, instance.object.vertices[v as usize]))
 }
-fn emit(
-    vertices: &mut Vec<Vertex>,
-    leaf: &mut u64,
-    stride: u64,
-    triangle: Triangle,
-    colors: [Rgb; 3],
-) -> Result<()> {
-    let selected = (*leaf).is_multiple_of(stride);
-    *leaf += 1;
-    if selected {
-        for k in 0..3 {
-            ensure!(
-                triangle[k].iter().all(|v| (*v as f32).is_finite()),
-                "Model coordinates exceed Float32 display range."
-            );
-            vertices.push(Vertex {
-                position: triangle[k].map(|v| v as f32),
-                color: colors[k],
-            });
-        }
+fn emit(vertices: &mut Vec<Vertex>, triangle: Triangle, colors: [Rgb; 3]) -> Result<()> {
+    for k in 0..3 {
+        ensure!(
+            triangle[k].iter().all(|v| (*v as f32).is_finite()),
+            "Model coordinates exceed Float32 display range."
+        );
+        vertices.push(Vertex {
+            position: triangle[k].map(|v| v as f32),
+            color: colors[k],
+        });
     }
     Ok(())
 }
-fn load_3mf(path: &Path, detail: GeometryDetail) -> Result<Model> {
+fn load_3mf(path: &Path) -> Result<Model> {
     let mut archive = Archive::open(path)?;
     let mut appearance = Appearance::default();
     let project = project_metadata(&mut archive, &mut appearance)?;
@@ -1473,9 +1472,7 @@ fn load_3mf(path: &Path, detail: GeometryDetail) -> Result<Model> {
                 .context("Model triangle count overflow")?;
         }
     }
-    let stride = detail.stride(expanded, &mut appearance);
-    let mut vertices = allocate_vertices(expanded, stride)?;
-    let mut leaf = 0;
+    let mut vertices = allocate_vertices(expanded)?;
     for instance in &walker.instances {
         for index in 0..instance.object.triangles.len() {
             let range = range_info(instance, index);
@@ -1520,11 +1517,11 @@ fn load_3mf(path: &Path, detail: GeometryDetail) -> Result<Model> {
                                 })
                             })
                         };
-                        emit(&mut vertices, &mut leaf, stride, points, colors)
+                        emit(&mut vertices, points, colors)
                     },
                 )?;
             } else {
-                emit(&mut vertices, &mut leaf, stride, points, colors)?;
+                emit(&mut vertices, points, colors)?;
             }
         }
     }
@@ -1610,6 +1607,124 @@ mod tests {
         assert!((a - b).abs() < 0.0001, "{a} != {b}");
     }
 
+    fn assert_stream_matches_full(path: &Path) {
+        let full = load_model_full(path).unwrap();
+        let mut index = 0;
+        let info = visit_stl(path, |triangle| {
+            for vertex in triangle {
+                assert_eq!(vertex.position, full.vertices[index].position);
+                assert_eq!(vertex.color, full.vertices[index].color);
+                index += 1;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(index, full.vertices.len());
+        assert_eq!(info.triangle_count, full.triangle_count);
+        assert_eq!(info.bounds_min, full.bounds_min);
+        assert_eq!(info.bounds_max, full.bounds_max);
+    }
+
+    #[test]
+    fn streaming_matches_full_ascii_binary_and_color_conventions() {
+        let ascii = format!(
+            "solid stream\n{}{}{}endsolid stream",
+            ascii_facet(-8.),
+            ascii_facet(35.),
+            ascii_facet(0.125),
+        );
+        let plain = binary_stl(&[(-8., 0), (35., 0), (0.125, 0)]);
+        let viscam = binary_stl(&[
+            (-8., 0x8000 | (31 << 10)),
+            (35., 0x8000 | (17 << 5) | 3),
+            (0.125, 0),
+        ]);
+        let mut magics = binary_stl(&[(-8., 0x8000), (35., 31), (0.125, 17 << 10)]);
+        magics[..10].copy_from_slice(b"COLOR=\x10\x80\xf0\xff");
+        let mut solid_header = plain.clone();
+        solid_header[..6].copy_from_slice(b"solid ");
+        let mut trailing = viscam.clone();
+        trailing.extend_from_slice(b"trailing data");
+        for bytes in [
+            ascii.as_bytes(),
+            plain.as_slice(),
+            viscam.as_slice(),
+            magics.as_slice(),
+            solid_header.as_slice(),
+            trailing.as_slice(),
+        ] {
+            let file = TestFile::bytes("stl", bytes);
+            assert_stream_matches_full(&file.0);
+        }
+    }
+
+    #[test]
+    fn streaming_retains_degenerate_facets_like_full_loader() {
+        let ascii = b"solid point\nfacet normal 0 0 0\nvertex 0 0 0\nvertex 0 0 0\nvertex 0 0 0\nendfacet\nendsolid";
+        let mut binary = binary_stl(&[(0., 0)]);
+        binary[96..132].fill(0);
+        for bytes in [ascii.as_slice(), binary.as_slice()] {
+            let file = TestFile::bytes("stl", bytes);
+            assert_stream_matches_full(&file.0);
+            let info = visit_stl(&file.0, |triangle| {
+                assert!(triangle.iter().all(|v| v.position == [0.; 3]));
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(info.triangle_count, 1);
+            assert_eq!(info.bounds_min, [0.; 3]);
+            assert_eq!(info.bounds_max, [0.; 3]);
+        }
+    }
+
+    #[test]
+    fn streaming_stops_immediately_and_preserves_callback_errors() {
+        let ascii = format!(
+            "solid callback\n{}{}endsolid callback",
+            ascii_facet(1.),
+            ascii_facet(2.),
+        );
+        let binary = binary_stl(&[(1., 0), (2., 0)]);
+        for bytes in [ascii.as_bytes(), binary.as_slice()] {
+            let file = TestFile::bytes("stl", bytes);
+            let mut calls = 0;
+            let error = visit_stl(&file.0, |_| {
+                calls += 1;
+                Err(std::io::Error::other("visitor stopped").into())
+            })
+            .unwrap_err();
+            assert_eq!(calls, 1);
+            assert_eq!(
+                error.downcast_ref::<std::io::Error>().unwrap().to_string(),
+                "visitor stopped"
+            );
+        }
+    }
+
+    #[test]
+    fn streaming_rejects_invalid_facets_after_valid_geometry() {
+        let ascii = format!(
+            "solid invalid\n{}facet normal 0 0 1\nvertex 1e100 0 0\nvertex 0 1 0\nvertex 0 0 1\nendfacet\nendsolid",
+            ascii_facet(0.),
+        );
+        let nonfinite = binary_stl(&[(0., 0), (f32::NAN, 0)]);
+        let mut truncated = binary_stl(&[(0., 0), (1., 0)]);
+        truncated.pop();
+        for bytes in [ascii.as_bytes(), nonfinite.as_slice(), truncated.as_slice()] {
+            let file = TestFile::bytes("stl", bytes);
+            assert!(load_model_full(&file.0).is_err());
+            let mut calls = 0;
+            assert!(
+                visit_stl(&file.0, |_| {
+                    calls += 1;
+                    Ok(())
+                })
+                .is_err()
+            );
+            assert!(calls <= 1);
+        }
+    }
+
     #[test]
     fn full_loader_preserves_tessellated_surface_in_stl_and_3mf() {
         const SIDE: u32 = 12;
@@ -1674,29 +1789,19 @@ mod tests {
                 full.vertices.iter().map(|v| v.position).collect::<Vec<_>>(),
                 expected
             );
-            assert!(!full.warnings.iter().any(|v| v.contains("stride-sampled")));
-            let sampled = load_model(&file.0, 37).unwrap();
-            assert!(sampled.vertices.len() < full.vertices.len());
-            assert!(sampled.vertices.len() <= 37 * 3);
-            assert_eq!(sampled.triangle_count, full.triangle_count);
-            assert_eq!(sampled.bounds_min, full.bounds_min);
-            assert_eq!(sampled.bounds_max, full.bounds_max);
-            assert!(
-                sampled
-                    .warnings
-                    .iter()
-                    .any(|v| v.contains("stride-sampled"))
-            );
+            if file.0.extension().is_some_and(|v| v == "stl") {
+                assert_stream_matches_full(&file.0);
+            }
         }
     }
 
     #[test]
     fn display_allocation_rejects_vertex_count_overflow() {
-        assert!(allocate_vertices(u64::MAX, 1).is_err());
+        assert!(allocate_vertices(u64::MAX).is_err());
     }
 
     #[test]
-    fn ascii_sampling_preserves_all_source_bounds() {
+    fn ascii_preserves_all_source_bounds() {
         let text = format!(
             "solid sample\n{}{}{}endsolid sample",
             ascii_facet(-3.),
@@ -1704,12 +1809,11 @@ mod tests {
             ascii_facet(2.)
         );
         let file = TestFile::bytes("stl", text.as_bytes());
-        let model = load_model(&file.0, 1).unwrap();
+        let model = load_model_full(&file.0).unwrap();
         assert_eq!(model.triangle_count, 3);
-        assert_eq!(model.vertices.len(), 3);
+        assert_eq!(model.vertices.len(), 9);
         assert_eq!(model.bounds_min, [-3., 0., 0.]);
         assert_eq!(model.bounds_max, [500., 1., 1.]);
-        assert!(model.warnings.iter().any(|v| v.contains("stride-sampled")));
     }
     #[test]
     fn ascii_rejects_broken_facets_and_nonfinite_positions() {
@@ -1720,18 +1824,19 @@ mod tests {
             "solid a\nfacet normal 0 0 1\nvertex NaN 0 0\nvertex 0 0 0\nvertex 0 1 0\nendfacet",
         ] {
             let file = TestFile::bytes("stl", text.as_bytes());
-            assert!(load_model(&file.0, 10).is_err());
+            assert!(load_model_full(&file.0).is_err());
+            assert!(visit_stl(&file.0, |_| Ok(())).is_err());
         }
     }
     #[test]
-    fn binary_bounds_palette_and_sampling_include_omitted_facets() {
+    fn binary_bounds_and_palette_include_all_facets() {
         let file = TestFile::bytes(
             "stl",
             &binary_stl(&[(0., 0), (999., 0x8000 | (31 << 10)), (-5., 0)]),
         );
-        let model = load_model(&file.0, 1).unwrap();
+        let model = load_model_full(&file.0).unwrap();
         assert_eq!(model.triangle_count, 3);
-        assert_eq!(model.vertices.len(), 3);
+        assert_eq!(model.vertices.len(), 9);
         assert_eq!(model.bounds_min, [-5., 0., 0.]);
         assert_eq!(model.bounds_max, [999., 1., 1.]);
         assert_eq!(model.palette, vec![[255, 0, 0]]);
@@ -1742,7 +1847,7 @@ mod tests {
         let mut bytes = binary_stl(&[(0., 0x8000), (1., 31)]);
         bytes[..10].copy_from_slice(b"COLOR=\x00\xff\x00\xff");
         let file = TestFile::bytes("stl", &bytes);
-        let model = load_model(&file.0, 10).unwrap();
+        let model = load_model_full(&file.0).unwrap();
         assert_eq!(model.vertices[0].color, [0., 1., 0.]);
         assert_eq!(model.vertices[3].color, [1., 0., 0.]);
     }
@@ -1751,7 +1856,7 @@ mod tests {
         let mut bytes = binary_stl(&[(0., 0)]);
         bytes[..6].copy_from_slice(b"solid ");
         let file = TestFile::bytes("stl", &bytes);
-        assert_eq!(load_model(&file.0, 1).unwrap().triangle_count, 1);
+        assert_eq!(load_model_full(&file.0).unwrap().triangle_count, 1);
     }
     #[test]
     fn binary_truncation_nonfinite_and_trailing_data_are_explicit() {
@@ -1759,18 +1864,18 @@ mod tests {
         truncated.pop();
         let file = TestFile::bytes("stl", &truncated);
         assert!(
-            load_model(&file.0, 1)
+            load_model_full(&file.0)
                 .unwrap_err()
                 .to_string()
                 .contains("truncated")
         );
         let file = TestFile::bytes("stl", &binary_stl(&[(f32::INFINITY, 0)]));
-        assert!(load_model(&file.0, 1).is_err());
+        assert!(load_model_full(&file.0).is_err());
         let mut trailing = binary_stl(&[(0., 0)]);
         trailing.extend_from_slice(b"trailer");
         let file = TestFile::bytes("stl", &trailing);
         assert!(
-            load_model(&file.0, 1)
+            load_model_full(&file.0)
                 .unwrap()
                 .warnings
                 .iter()
@@ -1778,11 +1883,10 @@ mod tests {
         );
     }
     #[test]
-    fn sample_limit_and_empty_models_are_rejected() {
+    fn empty_models_are_rejected() {
         let file = TestFile::bytes("stl", &binary_stl(&[]));
-        assert!(load_model(&file.0, 0).is_err());
-        assert!(load_model(&file.0, 2_000_001).is_err());
-        assert!(load_model(&file.0, 1).is_err());
+        assert!(load_model_full(&file.0).is_err());
+        assert!(visit_stl(&file.0, |_| Ok(())).is_err());
     }
     #[test]
     fn matrix_layout_rotation_translation_and_composition() {
@@ -1825,7 +1929,7 @@ mod tests {
         );
         let xml = model_xml(&resources, "<item objectid=\"1\"/>");
         let file = package(&[("3D/3dmodel.model", xml.as_bytes())]);
-        let model = load_model(&file.0, 10).unwrap();
+        let model = load_model_full(&file.0).unwrap();
         assert_eq!(
             model.vertices.iter().map(|v| v.color).collect::<Vec<_>>(),
             vec![[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]]
@@ -1845,7 +1949,7 @@ mod tests {
             "<item objectid=\"1\"/>",
         );
         let file = package(&[("3D/3dmodel.model", xml.as_bytes())]);
-        let model = load_model(&file.0, 1).unwrap();
+        let model = load_model_full(&file.0).unwrap();
         assert!(model.vertices.iter().all(|v| v.color == [0., 0., 1.]));
     }
     #[test]
@@ -1859,7 +1963,7 @@ mod tests {
             ("3D/3dmodel.model", root.as_bytes()),
             ("3D/child.model", child.as_bytes()),
         ]);
-        let model = load_model(&file.0, 10).unwrap();
+        let model = load_model_full(&file.0).unwrap();
         approx(model.bounds_min[0], 75.4); // 20 + 30 + one inch.
         approx(model.bounds_max[0], 126.2);
         approx(model.bounds_max[1], 50.8);
@@ -1878,7 +1982,7 @@ mod tests {
             ("Models/root.model", root.as_bytes()),
             ("Models/child.model", child.as_bytes()),
         ]);
-        let model = load_model(&file.0, 10).unwrap();
+        let model = load_model_full(&file.0).unwrap();
         approx(model.bounds_min[0], 20.);
         approx(model.bounds_max[0], 70.8);
     }
@@ -1901,7 +2005,7 @@ mod tests {
             ("Metadata/model_settings.config", config.as_bytes()),
             ("Metadata/project_settings.config", settings.as_bytes()),
         ]);
-        let model = load_model(&file.0, 10).unwrap();
+        let model = load_model_full(&file.0).unwrap();
         assert_eq!(model.triangle_count, 1);
         assert_eq!(model.bounds_max, [2., 2., 0.]);
         assert!(model.vertices.iter().all(|v| v.color == [0., 1., 0.]));
@@ -1920,7 +2024,7 @@ mod tests {
             ("Metadata/Slic3r_PE_model.config", config.as_bytes()),
             ("Metadata/project_settings.config", settings.as_bytes()),
         ]);
-        let model = load_model(&file.0, 10).unwrap();
+        let model = load_model_full(&file.0).unwrap();
         assert_eq!(model.triangle_count, 1);
         assert_eq!(model.vertices[0].color, [0., 0., 1.]);
     }
@@ -1978,10 +2082,8 @@ mod tests {
         assert!(model.vertices[..3].iter().all(|v| v.color == [1., 1., 0.]));
         assert_eq!(model.vertices[3].color, [1., 0., 0.]);
         assert_eq!(model.vertices[5].color, [0., 0.5, 0.5]);
-        let sampled = load_model(&file.0, 1).unwrap();
-        assert_eq!(sampled.vertices.len(), 3);
-        assert_eq!(sampled.bounds_max, [2., 2., 0.]);
-        assert!(sampled.palette.contains(&[255, 255, 0]));
+        assert_eq!(model.bounds_max, [2., 2., 0.]);
+        assert!(model.palette.contains(&[255, 255, 0]));
     }
     #[test]
     fn malformed_painting_warns_and_uses_only_known_base_filament() {
@@ -1994,7 +2096,7 @@ mod tests {
             ("3D/3dmodel.model", xml.as_bytes()),
             ("Metadata/project_settings.config", settings.as_bytes()),
         ]);
-        let model = load_model(&file.0, 10).unwrap();
+        let model = load_model_full(&file.0).unwrap();
         assert_eq!(model.vertices.len(), 3);
         assert!(
             model
@@ -2012,7 +2114,7 @@ mod tests {
             ("3D/3dmodel.model", xml.as_bytes()),
             ("Metadata/project_settings.config", settings.as_bytes()),
         ]);
-        let model = load_model(&file.0, 10).unwrap();
+        let model = load_model_full(&file.0).unwrap();
         assert_eq!(model.vertices[0].color, DEFAULT_RGB);
         assert!(
             model
@@ -2029,7 +2131,7 @@ mod tests {
         );
         let xml = model_xml(&resources, "<item objectid=\"1\"/>");
         let file = package(&[("3D/3dmodel.model", xml.as_bytes())]);
-        let model = load_model(&file.0, 10).unwrap();
+        let model = load_model_full(&file.0).unwrap();
         assert_eq!(model.vertices[0].color, DEFAULT_RGB);
         assert!(model.warnings.iter().any(|v| v.contains("texture2dgroup")));
         assert!(
@@ -2082,7 +2184,7 @@ mod tests {
             model_xml(&mesh(1, ""), ""),
         ] {
             let file = package(&[("3D/3dmodel.model", xml.as_bytes())]);
-            assert!(load_model(&file.0, 10).is_err());
+            assert!(load_model_full(&file.0).is_err());
         }
     }
     #[test]
@@ -2148,7 +2250,7 @@ mod streaming_boundary_tests {
     }
 
     #[test]
-    fn invalid_coordinates_are_detected_even_when_display_would_skip_them() {
+    fn invalid_coordinates_are_detected_in_every_source_facet() {
         let mut bounds = Bounds::new();
         assert!(bounds.include([f32::MAX as f64 * 2., 0., 0.]).is_err());
         let text = b"solid bad\nfacet normal 0 0 1\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendfacet\nfacet normal 0 0 1\nvertex 1e100 0 0\nvertex 1 0 0\nvertex 0 1 0\nendfacet\nendsolid";

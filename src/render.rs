@@ -1,5 +1,6 @@
-use crate::types::{Camera, Model, Raster};
+use crate::types::{Camera, Model, Raster, Vertex};
 use glam::Vec3;
+use std::path::Path;
 
 const MAX_SIDE: u32 = 4096;
 
@@ -17,59 +18,156 @@ pub(crate) fn bounded_dimensions(width: u32, height: u32) -> (u32, u32) {
 /// Orthographic, Z-up orbit view. Depth increases toward the camera. Triangle soup is
 /// processed directly: no projected-mesh copy, triangle sorting, or per-triangle heap work.
 pub fn render_model(model: &Model, width: u32, height: u32, camera: Camera) -> Raster {
+    if model.vertices.len() < 3 {
+        return empty_raster(width, height);
+    }
+    let mut frame = RasterFrame::new(model.bounds_min, model.bounds_max, width, height, camera);
+    for triangle in model.vertices.as_chunks::<3>().0 {
+        frame.draw(*triangle);
+    }
+    frame.raster
+}
+
+/// Render every source facet without retaining an STL's triangle soup in memory.
+pub fn render_file_thumbnail(path: &Path, width: u32, height: u32) -> anyhow::Result<Raster> {
+    if path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("stl"))
+    {
+        let info = crate::model::visit_stl(path, |_| Ok(()))?;
+        let mut frame = RasterFrame::new(
+            info.bounds_min,
+            info.bounds_max,
+            width,
+            height,
+            Camera::default(),
+        );
+        crate::model::visit_stl(path, |triangle| {
+            frame.draw(triangle);
+            Ok(())
+        })?;
+        Ok(frame.raster)
+    } else {
+        let model = crate::model::load_model_full(path)?;
+        Ok(render_model(&model, width, height, Camera::default()))
+    }
+}
+
+fn empty_raster(width: u32, height: u32) -> Raster {
     let (width, height) = bounded_dimensions(width, height);
-    let count = width as usize * height as usize;
-    let mut raster = Raster {
+    Raster {
         width,
         height,
-        rgba: vec![0; count * 4],
-    };
-    if model.vertices.len() < 3 {
-        return raster;
+        rgba: vec![0; width as usize * height as usize * 4],
     }
-    let mut center = [0.0_f64; 3];
-    let mut radius_squared = 0.0;
-    for (axis, c) in center.iter_mut().enumerate() {
-        let lo = f64::from(model.bounds_min[axis]);
-        let hi = f64::from(model.bounds_max[axis]);
-        if !lo.is_finite() || !hi.is_finite() || hi < lo {
-            return raster;
+}
+
+struct Projection {
+    center: [f64; 3],
+    radius: f64,
+    right: Vec3,
+    up: Vec3,
+    toward: Vec3,
+    scale: f32,
+    pan: [f32; 2],
+    light: Vec3,
+}
+
+impl Projection {
+    fn new(
+        bounds_min: [f32; 3],
+        bounds_max: [f32; 3],
+        width: u32,
+        height: u32,
+        camera: Camera,
+    ) -> Option<Self> {
+        let mut center = [0.0_f64; 3];
+        let mut radius_squared = 0.0;
+        for (axis, c) in center.iter_mut().enumerate() {
+            let lo = f64::from(bounds_min[axis]);
+            let hi = f64::from(bounds_max[axis]);
+            if !lo.is_finite() || !hi.is_finite() || hi < lo {
+                return None;
+            }
+            *c = (lo + hi) * 0.5;
+            radius_squared += ((hi - lo) * 0.5).powi(2);
         }
-        *c = (lo + hi) * 0.5;
-        radius_squared += ((hi - lo) * 0.5).powi(2);
-    }
-    let radius = radius_squared.sqrt().max(1.0e-15);
-    let yaw = if camera.yaw.is_finite() {
-        camera.yaw
-    } else {
-        -0.95
-    };
-    let pitch = if camera.pitch.is_finite() {
-        camera.pitch
-    } else {
-        0.55
-    };
-    let zoom = if camera.zoom.is_finite() {
-        camera.zoom.clamp(0.02, 1000.0)
-    } else {
-        1.0
-    };
-    let (sy, cy) = yaw.sin_cos();
-    let (sp, cp) = pitch.sin_cos();
-    let right = Vec3::new(-sy, cy, 0.0);
-    let up = Vec3::new(-cy * sp, -sy * sp, cp);
-    let toward = Vec3::new(cy * cp, sy * cp, sp);
-    let scale = width.min(height) as f32 * 0.45 * zoom;
-    let pan = camera.pan.map(|v| {
-        if v.is_finite() {
-            v * width.min(height) as f32
+        let radius = radius_squared.sqrt().max(1.0e-15);
+        let yaw = if camera.yaw.is_finite() {
+            camera.yaw
         } else {
-            0.0
+            -0.95
+        };
+        let pitch = if camera.pitch.is_finite() {
+            camera.pitch
+        } else {
+            0.55
+        };
+        let zoom = if camera.zoom.is_finite() {
+            camera.zoom.clamp(0.02, 1000.0)
+        } else {
+            1.0
+        };
+        let (sy, cy) = yaw.sin_cos();
+        let (sp, cp) = pitch.sin_cos();
+        let right = Vec3::new(-sy, cy, 0.0);
+        let up = Vec3::new(-cy * sp, -sy * sp, cp);
+        let toward = Vec3::new(cy * cp, sy * cp, sp);
+        let scale = width.min(height) as f32 * 0.45 * zoom;
+        let pan = camera.pan.map(|v| {
+            if v.is_finite() {
+                v * width.min(height) as f32
+            } else {
+                0.0
+            }
+        });
+        let light = (toward * 0.7 - right * 0.3 + up * 0.6).normalize();
+        Some(Self {
+            center,
+            radius,
+            right,
+            up,
+            toward,
+            scale,
+            pan,
+            light,
+        })
+    }
+}
+
+struct RasterFrame {
+    raster: Raster,
+    depth: Vec<f32>,
+    projection: Option<Projection>,
+}
+
+impl RasterFrame {
+    fn new(
+        bounds_min: [f32; 3],
+        bounds_max: [f32; 3],
+        width: u32,
+        height: u32,
+        camera: Camera,
+    ) -> Self {
+        let raster = empty_raster(width, height);
+        let projection =
+            Projection::new(bounds_min, bounds_max, raster.width, raster.height, camera);
+        let depth = if projection.is_some() {
+            vec![f32::NEG_INFINITY; raster.width as usize * raster.height as usize]
+        } else {
+            Vec::new()
+        };
+        Self {
+            raster,
+            depth,
+            projection,
         }
-    });
-    let light = (toward * 0.7 - right * 0.3 + up * 0.6).normalize();
-    let mut depth = vec![f32::NEG_INFINITY; count];
-    for triangle in model.vertices.as_chunks::<3>().0 {
+    }
+
+    fn draw(&mut self, triangle: [Vertex; 3]) {
+        let Some(projection) = &self.projection else {
+            return;
+        };
         let mut positions = [Vec3::ZERO; 3];
         let mut screen = [Vec3::ZERO; 3];
         let mut colors = [Vec3::ZERO; 3];
@@ -77,35 +175,37 @@ pub fn render_model(model: &Model, width: u32, height: u32, camera: Camera) -> R
         for i in 0..3 {
             let p = triangle[i].position;
             positions[i] = Vec3::new(
-                ((f64::from(p[0]) - center[0]) / radius) as f32,
-                ((f64::from(p[1]) - center[1]) / radius) as f32,
-                ((f64::from(p[2]) - center[2]) / radius) as f32,
+                ((f64::from(p[0]) - projection.center[0]) / projection.radius) as f32,
+                ((f64::from(p[1]) - projection.center[1]) / projection.radius) as f32,
+                ((f64::from(p[2]) - projection.center[2]) / projection.radius) as f32,
             );
             valid &= positions[i].is_finite();
             screen[i] = Vec3::new(
-                width as f32 * 0.5 + pan[0] + positions[i].dot(right) * scale,
-                height as f32 * 0.5 + pan[1] - positions[i].dot(up) * scale,
-                positions[i].dot(toward),
+                self.raster.width as f32 * 0.5
+                    + projection.pan[0]
+                    + positions[i].dot(projection.right) * projection.scale,
+                self.raster.height as f32 * 0.5 + projection.pan[1]
+                    - positions[i].dot(projection.up) * projection.scale,
+                positions[i].dot(projection.toward),
             );
             colors[i] = Vec3::from_array(triangle[i].color).clamp(Vec3::ZERO, Vec3::ONE);
             valid &= colors[i].is_finite();
         }
         if !valid {
-            continue;
+            return;
         }
         let normal = (positions[1] - positions[0]).cross(positions[2] - positions[0]);
         if !normal.is_finite() || normal.length_squared() == 0.0 {
-            continue;
+            return;
         }
         // Two-sided shading intentionally keeps open STL surfaces and mirrored parts visible.
         let mut normal = normal.normalize();
-        if normal.dot(toward) < 0.0 {
+        if normal.dot(projection.toward) < 0.0 {
             normal = -normal;
         }
-        let shade = 0.38 + 0.62 * normal.dot(light).max(0.0);
-        draw_triangle(&mut raster, &mut depth, screen, colors, shade);
+        let shade = 0.38 + 0.62 * normal.dot(projection.light).max(0.0);
+        draw_triangle(&mut self.raster, &mut self.depth, screen, colors, shade);
     }
-    raster
 }
 
 fn edge(a: Vec3, b: Vec3, x: f32, y: f32) -> f32 {
@@ -376,5 +476,117 @@ mod tests {
         assert_eq!(camera.zoom, 0.02);
         camera.zoom_at(1.0e9, cursor);
         assert_eq!(camera.zoom, 1000.0);
+    }
+
+    fn colored_cube(subdivisions: u32) -> Model {
+        let mut vertices = Vec::new();
+        for u in 0..subdivisions {
+            for v in 0..subdivisions {
+                for axis in 0..3 {
+                    let mut color = [0.0; 3];
+                    color[axis] = 1.0;
+                    for side in [-1.0, 1.0] {
+                        let point = |u: u32, v: u32| {
+                            let mut position = [0.0; 3];
+                            position[axis] = side;
+                            position[(axis + 1) % 3] = -1.0 + 2.0 * u as f32 / subdivisions as f32;
+                            position[(axis + 2) % 3] = -1.0 + 2.0 * v as f32 / subdivisions as f32;
+                            Vertex { position, color }
+                        };
+                        let a = point(u, v);
+                        let b = point(u + 1, v);
+                        let c = point(u + 1, v + 1);
+                        let d = point(u, v + 1);
+                        vertices.extend([a, b, c, a, c, d]);
+                    }
+                }
+            }
+        }
+        model(vertices)
+    }
+
+    fn write_colored_stl(path: &Path, model: &Model) {
+        use std::io::Write;
+        let mut writer = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
+        writer.write_all(&[0; 80]).unwrap();
+        writer
+            .write_all(&(model.triangle_count as u32).to_le_bytes())
+            .unwrap();
+        for triangle in model.vertices.as_chunks::<3>().0 {
+            writer.write_all(&[0; 12]).unwrap();
+            for vertex in triangle {
+                for value in vertex.position {
+                    writer.write_all(&value.to_le_bytes()).unwrap();
+                }
+            }
+            let color = triangle[0].color;
+            let attribute = 0x8000_u16
+                | ((color[0] * 31.0) as u16) << 10
+                | ((color[1] * 31.0) as u16) << 5
+                | (color[2] * 31.0) as u16;
+            writer.write_all(&attribute.to_le_bytes()).unwrap();
+        }
+        writer.flush().unwrap();
+    }
+
+    #[test]
+    fn dense_closed_stl_thumbnail_preserves_surface_coverage_and_colors() {
+        // 248,832 real facets exceed the former 120,000-facet thumbnail budget.
+        // Interleaved, finely tessellated faces make stride sampling perforate the cube.
+        let dense = colored_cube(144);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("dense-colored-cube.STL");
+        write_colored_stl(&path, &dense);
+        let full = crate::model::load_model_full(&path).unwrap();
+        let expected = render_model(&full, 192, 192, Camera::default());
+        let streamed = render_file_thumbnail(&path, 192, 192).unwrap();
+        assert_eq!((streamed.width, streamed.height), (192, 192));
+        assert_eq!(streamed.rgba, expected.rgba);
+        // Check decoded source colors too, not merely agreement between two consumers.
+        let direct = render_model(&dense, 192, 192, Camera::default());
+        assert_eq!(streamed.rgba, direct.rgba);
+        for channel in 0..3 {
+            assert!(
+                streamed.rgba.as_chunks::<4>().0.iter().any(|pixel| {
+                    pixel[channel] > 0
+                        && pixel[(channel + 1) % 3] == 0
+                        && pixel[(channel + 2) % 3] == 0
+                        && pixel[3] == 255
+                }),
+                "missing visible face color {channel}"
+            );
+        }
+
+        let coarse = render_model(&colored_cube(1), 192, 192, Camera::default());
+        let stride = (dense.triangle_count as usize).div_ceil(120_000);
+        let sparse = model(
+            dense
+                .vertices
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .step_by(stride)
+                .flat_map(|triangle| triangle.iter().copied())
+                .collect(),
+        );
+        let sparse = render_model(&sparse, 192, 192, Camera::default());
+        let alpha = |raster: &Raster, x: usize, y: usize| raster.rgba[(y * 192 + x) * 4 + 3];
+        let mut interior = 0;
+        let mut sparse_holes = 0;
+        for y in 1..191 {
+            for x in 1..191 {
+                // Ignore the silhouette's one-pixel numerical boundary.
+                if (y - 1..=y + 1).all(|yy| (x - 1..=x + 1).all(|xx| alpha(&coarse, xx, yy) == 255))
+                {
+                    interior += 1;
+                    assert_eq!(alpha(&streamed, x, y), 255, "surface hole at {x},{y}");
+                    if alpha(&sparse, x, y) == 0 {
+                        sparse_holes += 1;
+                    }
+                }
+            }
+        }
+        assert!(interior > 3_000);
+        assert!(sparse_holes > 100, "fixture must expose sparse-facet holes");
     }
 }

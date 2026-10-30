@@ -7,8 +7,8 @@ A native **Rust** Windows application for organizing a 3D-printing library: STL 
 Windows x64, Windows 10 version 1809 or newer, with a working OpenGL graphics driver.
 
 - **Installer:** run `Print-Atlas-Setup.exe`. Installs for the current user without administrator access. Optional Start menu and desktop shortcuts are offered.
-- **Portable:** extract the complete `Print-Atlas-2.0.2-windows-x64.zip`, then run `Print Atlas.exe`. Keep the accompanying `runtime` directory and third-party notices beside the executable.
-- **This source checkout:** after packaging, run `release/Print Atlas 2.0.2.exe`. Manual shortcuts should target this versioned launcher.
+- **Portable:** extract the complete `Print-Atlas-2.0.3-windows-x64.zip`, then run `Print Atlas.exe`. Keep the accompanying `runtime` directory and third-party notices beside the executable.
+- **This source checkout:** after packaging, run `release/Print Atlas 2.0.3.exe`. Manual shortcuts should target this versioned launcher.
 
 The executable and installer are unsigned. Windows SmartScreen may show an unknown-publisher warning. Downloads include `SHA256SUMS.txt`; verify an artifact with `Get-FileHash -Algorithm SHA256`.
 
@@ -35,7 +35,7 @@ The tree and grid mount only visible rows. Thumbnail work runs on bounded backgr
 - **Interactive 3D** uses a native Rust, depth-buffered renderer. Drag to orbit, scroll to zoom around the cursor, right-drag or Shift-drag to pan, and **Reset view** to restore the camera. Pan and zoom rerender geometry in the actual viewport rather than moving a cropped image; zoom supports 0.02×–1000×.
 - Nested/external in-archive 3MF components, unit conversion, standard materials and vertex colors, object/part filament assignments, recursive Bambu triangle painting, and modifier exclusion.
 
-Interactive inspection retains all printable triangles, including painted 3MF subdivisions, so surfaces are not perforated by triangle sampling. Geometry memory scales with the complete mesh; very large models may take longer to open or report an allocation error. Generated thumbnails retain a 120,000-triangle sampling budget and can show incomplete small surfaces. Dimensions include all original triangles. Source models are never simplified or rewritten.
+Interactive inspection and generated mesh thumbnails retain all printable triangles, including painted 3MF subdivisions; no geometry is discarded for a triangle budget. STL thumbnails use two streaming passes into fixed-size image/depth buffers instead of retaining the complete mesh. Interactive geometry and the 3MF thumbnail fallback still require memory for the complete expanded mesh, so very large files may take longer or report an allocation error. Dimensions include all original triangles. Source models are never simplified or rewritten.
 
 Textures, transparency, composite materials, and physical multi-color filament appearances are not fully reproduced in interactive 3D. Unsupported appearance is reported rather than invented. Saved Bambu plate renders remain the reference for exact slicer appearance. A sliced-only project can show saved plates without providing an interactive mesh.
 
@@ -109,11 +109,11 @@ powershell -ExecutionPolicy Bypass -File scripts/package.ps1
 This provisions verified build tools/runtime, performs a locked optimized Windows x64 build with static CRT, generates complete Rust dependency notices, and creates:
 
 ```text
-release/Print Atlas 2.0.2.exe
+release/Print Atlas 2.0.3.exe
 release/runtime/
 release/third-party-licenses/
 release/Print-Atlas-Setup.exe
-release/Print-Atlas-2.0.2-windows-x64.zip
+release/Print-Atlas-2.0.3-windows-x64.zip
 release/SHA256SUMS.txt
 ```
 
@@ -124,7 +124,7 @@ Keep `Cargo.lock` committed. Generated binaries, caches, downloaded runtime DLLs
 This directory is a local Git repository on `main`. No remote is configured and nothing has been uploaded. Add your GitHub repository as `origin` and push when ready.
 
 - `.github/workflows/ci.yml`: Windows formatting, strict Clippy, and locked tests on pushes and pull requests.
-- `.github/workflows/release.yml`: pushing a version tag such as **`v2.0.2`** builds the installer, portable ZIP, and checksums and publishes them as GitHub release assets. The tag must match `Cargo.toml`'s version.
+- `.github/workflows/release.yml`: pushing a version tag such as **`v2.0.3`** builds the installer, portable ZIP, and checksums and publishes them as GitHub release assets. The tag must match `Cargo.toml`'s version.
 - Release publishing receives `contents: write` only in its release job. No repository owner/name or credentials are hardcoded.
 
 Local verification does not claim a hosted GitHub Actions run. The hosted workflow executes after you push.
@@ -140,6 +140,10 @@ Local verification does not claim a hosted GitHub Actions run. The hosted workfl
 - `src/blend.rs`: bounded, read-only extraction of embedded Blender thumbnails; no scene evaluation. Format references: [Blender block headers](https://github.com/blender/blender/blob/main/scripts/modules/_blendfile_header.py) and [thumbnail layout](https://github.com/blender/blender/blob/main/source/blender/blenkernel/BKE_main.hh).
 - `src/main.rs`, `src/types.rs`: startup/diagnostic CLI and shared data types.
 - `scripts/`, `installer/`, `.github/workflows/`: verified runtime/build-tool acquisition, dependency notices, packaging, installation, and CI/releases.
+
+## 2.0.3
+
+Fixed perforated grid thumbnails by removing the remaining triangle-sampling path. STL thumbnails stream every facet into the rasterizer without retaining a full mesh; 3MF geometry fallback uses full detail. The thumbnail cache identity changed, so old sparse images regenerate automatically when browsed after restarting the updated app. No manual cache deletion is needed.
 
 ## 2.0.2
 

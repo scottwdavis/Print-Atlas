@@ -190,7 +190,7 @@ fn key(file: &FileEntry) -> String {
     format!(
         "{:x}",
         Sha256::digest(format!(
-            "native-2:{}:{}:{}",
+            "native-3-full-surfaces:{}:{}:{}",
             file.path.display(),
             file.size,
             file.mtime
@@ -218,20 +218,10 @@ fn thumbnail(file: &FileEntry, key: &str) -> anyhow::Result<(Option<Raster>, Str
             if let Some((_, bytes)) = plates.first() {
                 raster(bytes, 420)?
             } else {
-                render::render_model(
-                    &model::load_model(&file.path, 120_000)?,
-                    420,
-                    320,
-                    Camera::default(),
-                )
+                render::render_file_thumbnail(&file.path, 420, 320)?
             }
         } else {
-            render::render_model(
-                &model::load_model(&file.path, 120_000)?,
-                420,
-                320,
-                Camera::default(),
-            )
+            render::render_file_thumbnail(&file.path, 420, 320)?
         };
         if let Some(parent) = cache.parent() {
             std::fs::create_dir_all(parent)?;
