@@ -121,7 +121,7 @@ Keep `Cargo.lock` committed. Generated binaries, caches, downloaded runtime DLLs
 
 ## GitHub repository and releases
 
-This directory is a local Git repository on `main`. No remote is configured and nothing has been uploaded. Add your GitHub repository as `origin` and push when ready.
+The repository is [scottwdavis/Print-Atlas](https://github.com/scottwdavis/Print-Atlas), with `main` as the primary branch. The SSH remote is `git@github.com:scottwdavis/Print-Atlas.git`.
 
 - `.github/workflows/ci.yml`: Windows formatting, strict Clippy, and locked tests on pushes and pull requests.
 - `.github/workflows/release.yml`: pushing a version tag such as **`v2.0.3`** builds the installer, portable ZIP, and checksums and publishes them as GitHub release assets. The tag must match `Cargo.toml`'s version.
@@ -129,7 +129,7 @@ This directory is a local Git repository on `main`. No remote is configured and 
 
 Local verification does not claim a hosted GitHub Actions run. The hosted workflow executes after you push.
 
-**Project source licensing has not been selected.** Choose an appropriate license before inviting outside reuse/contributions. This does not change bundled third-party licenses: dependency attribution, license texts, source links, font notices, and PDFium notices are included in both distribution formats. The package is marked `publish = false` only to prevent accidental crates.io publication and to exclude project-owned source from third-party notice generation; GitHub source and binary releases are unaffected.
+Project source licensing is provided in [LICENSE](LICENSE) (GNU General Public License, version 3). Third-party dependencies retain their own licenses: dependency attribution, license texts, source links, font notices, and PDFium notices are included in both distribution formats. The package is marked `publish = false` only to prevent accidental crates.io publication and to exclude project-owned source from third-party notice generation; GitHub source and binary releases are unaffected.
 
 ## Source layout
 
